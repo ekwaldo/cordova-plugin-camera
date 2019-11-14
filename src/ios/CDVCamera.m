@@ -184,7 +184,11 @@ static NSString* toBase64(NSData* data) {
       
        NSURL *filePath = contentEditingInput.fullSizeImageURL;
        NSString *fileLocation = [filePath.absoluteString stringByReplacingOccurrencesOfString:@"file://" withString:@""];
-       NSString *fileName = [[fileLocation componentsSeparatedByString:@"/"] lastObject];
+       NSString *fileName = [[fileLocation lastPathComponent] stringByDeletingPathExtension];
+    
+       NSString * miliTimeStamp = [NSString stringWithFormat:@"%f",[[NSDate date] timeIntervalSince1970] * 1000];
+       //Add the timestamp to the filename
+       fileName = [fileName stringByAppendingFormat:@"_%@", miliTimeStamp];
        location = [tempPath stringByAppendingString:fileName];
        
        NSError *error;
