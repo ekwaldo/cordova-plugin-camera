@@ -752,7 +752,8 @@ NSString *multiSelectCallbackId;
     // generate unique file name
     int i = 1;
     do {
-        filePath = [NSString stringWithFormat:@"%@/%@%03d.%@", docsPath, CDV_PHOTO_PREFIX, i++, extension];
+        NSString * miliTimeStamp = [NSString stringWithFormat:@"%f",[[NSDate date] timeIntervalSince1970] * 1000];
+        filePath = [NSString stringWithFormat:@"%@/%@%03d_%@.%@", docsPath, CDV_PHOTO_PREFIX, i++,miliTimeStamp, extension];
     } while ([fileMgr fileExistsAtPath:filePath]);
 
     return filePath;
