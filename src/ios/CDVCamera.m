@@ -30,6 +30,7 @@
 #import <MobileCoreServices/UTCoreTypes.h>
 #import <objc/message.h>
 #import <Photos/Photos.h>
+#import <PhotosUI/PhotosUI.h>
 
 #ifndef __CORDOVA_4_0_0
     #import <Cordova/NSData+Base64.h>
@@ -349,7 +350,7 @@ static NSString* toBase64(NSData* data) {
 @end
 
 
-@interface CDVCamera () <ViewControllerDelegate>
+@interface CDVCamera () <ViewControllerDelegate, PHPickerViewControllerDelegate>
 
 @property (readwrite, assign) BOOL hasPendingOperation;
 
@@ -457,6 +458,7 @@ NSString *multiSelectCallbackId;
             // Check if multi select is allowed to decide which picker to show
             if([pictureOptions allowMultiSelect])
             {
+                //When user hits "choose options" this is when the multi-select is called
                 [weakSelf showCameraMultiPicker:command.callbackId withOptions:pictureOptions];
             }
             else
@@ -521,16 +523,153 @@ NSString *multiSelectCallbackId;
 - (void)showCameraMultiPicker:(NSString*)callbackId withOptions:(CDVPictureOptions *) pictureOptions
 {
     CDVCameraPicker* cameraPicker = [CDVCameraPicker createFromPictureOptions:pictureOptions];
+    multiSelectCallbackId = callbackId;
     self.pickerController = cameraPicker;
     
-    multiSelectCallbackId = callbackId;
-    [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
-        if (status == PHAuthorizationStatusAuthorized) {
-            [self loadAlbums];
-        } else {
-            NSLog(@"No Access");
+    //If the new iOS14 Native Multi-Select is supported....
+    if (@available(iOS 14, *)) {
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.selectionLimit = 5;
+        config.filter = [PHPickerFilter imagesFilter];
+        
+        PHPickerViewController *pickerViewController = [[PHPickerViewController alloc] initWithConfiguration:config];
+        pickerViewController.delegate = self;
+        [self.viewController presentViewController:pickerViewController animated:YES completion:nil];
+        
+    //Otherwise, do the custom photo picker
+    }else{
+        
+        [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+            if (status == PHAuthorizationStatusAuthorized) {
+                [self loadAlbums];
+            } else {
+                NSLog(@"No Access");
+            }
+        }];
+    }
+}
+
+-(void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)){
+    NSLog(@"-picker:%@ didFinishPicking:%@", picker, results);
+    
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    
+    if (results.count == 0){
+        CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"no image selected"];   // error callback expects string ATM
+        [self.commandDelegate sendPluginResult:result callbackId:multiSelectCallbackId];
+    }else{
+        
+    
+        // Create the array object to return
+        NSMutableArray *items = [NSMutableArray new];
+        
+        NSMutableArray *supportedRepresentations = [NSArray arrayWithObjects:
+            kUTTypeRawImage,
+            kUTTypeTIFF,
+            kUTTypeBMP,
+            kUTTypePNG,
+            AVFileTypeHEIF,
+            AVFileTypeHEIC,
+            kUTTypeJPEG,
+            kUTTypeGIF,
+            nil
+        ];
+        
+        //Fill up the asset indentifers array from the results
+        for (PHPickerResult *result in results) {
+            //Iterate over the registered type identifiers
+            NSString *chosenRepresentation;
+            
+            for (NSString* typeId in result.itemProvider.registeredTypeIdentifiers){
+                NSLog(@"Canto: File type is: %@", typeId);
+                if ([supportedRepresentations containsObject:typeId]){
+                    NSLog(@"Canto: %@ is supported!", typeId);
+                    chosenRepresentation = typeId;
+                }
+            }
+            
+            if (chosenRepresentation == nil) {
+                chosenRepresentation = result.itemProvider.registeredTypeIdentifiers.firstObject;
+            }
+            
+            [result.itemProvider loadFileRepresentationForTypeIdentifier:chosenRepresentation completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                NSLog(@"%@", url);
+                [self copyAndGetAssetLocationFromUrl:url assetLocations:items];
+            }];
         }
+        
+        //This will wait until all the image paths are populated
+        while([items count] < [results count]){
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+        }
+        
+        NSDictionary *dictionary = @{@"list": items};
+        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK  messageAsDictionary:dictionary];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:multiSelectCallbackId];
+    }
+    
+}
+
+-(void) copyAndGetAssetLocationFromUrl:(NSURL* )filePath assetLocations:(NSMutableArray *)assetLocations {
+    
+    NSString *tempPath = [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) lastObject] stringByAppendingString:@"/"];
+    NSString *location;
+    
+    NSString *fileLocation = [filePath.absoluteString stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+    NSString *fileName = [[fileLocation lastPathComponent] stringByDeletingPathExtension];
+
+    NSString * miliTimeStamp = [NSString stringWithFormat:@"%f",[[NSDate date] timeIntervalSince1970] * 1000];
+    //Add the timestamp to the filename
+    fileName = [fileName stringByAppendingFormat:@"_%@", miliTimeStamp];
+    location = [tempPath stringByAppendingString:fileName];
+
+    NSError *error;
+    if([[NSFileManager defaultManager] fileExistsAtPath:location])
+    {
+       if(![[NSFileManager defaultManager] removeItemAtPath:location error:&error])
+       {
+           NSLog(@"%@", [error localizedDescription]);
+       }
+    }
+
+    UIImage* resultImage = [UIImage imageWithContentsOfFile: fileLocation];
+    [UIImageJPEGRepresentation(resultImage, 1.0) writeToFile:location atomically:YES];
+    [assetLocations addObject:location];
+}
+
+-(void) copyAndGetAssetLocation:(PHAsset * )asset assetLocations:(NSMutableArray *)assetLocations {
+    NSString *tempPath = [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) lastObject] stringByAppendingString:@"/"];
+    
+    __block NSString *location;
+    
+    PHContentEditingInputRequestOptions *editingInputRequestOptions = [PHContentEditingInputRequestOptions new];
+    [asset requestContentEditingInputWithOptions:editingInputRequestOptions completionHandler:^(PHContentEditingInput * _Nullable contentEditingInput, NSDictionary * _Nonnull info) {
+      
+       NSURL *filePath = contentEditingInput.fullSizeImageURL;
+       NSString *fileLocation = [filePath.absoluteString stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+       NSString *fileName = [[fileLocation lastPathComponent] stringByDeletingPathExtension];
+    
+       NSString * miliTimeStamp = [NSString stringWithFormat:@"%f",[[NSDate date] timeIntervalSince1970] * 1000];
+       //Add the timestamp to the filename
+       fileName = [fileName stringByAppendingFormat:@"_%@", miliTimeStamp];
+       location = [tempPath stringByAppendingString:fileName];
+       
+       NSError *error;
+       if([[NSFileManager defaultManager] fileExistsAtPath:location])
+       {
+           if(![[NSFileManager defaultManager] removeItemAtPath:location error:&error])
+           {
+               NSLog(@"%@", [error localizedDescription]);
+           }
+       }
+       
+       UIImage* resultImage = [UIImage imageWithContentsOfFile: fileLocation];
+       [UIImageJPEGRepresentation(resultImage, 1.0) writeToFile:location atomically:YES];
+       [assetLocations addObject:location];
+        
     }];
+
+    return;
 }
 
 - (void)showCameraPicker:(NSString*)callbackId withOptions:(CDVPictureOptions *) pictureOptions
